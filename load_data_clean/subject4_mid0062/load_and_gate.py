@@ -81,7 +81,7 @@ def generate_ga_coords(num_partitions, num_spokes, num_samples):
     return golden_angle_coords_3d(img_shape, num_spokes, num_samples)
 
 def sort_data_by_gate(chronological_data, coords_all, gate_idx, acquisitions_to_keep, num_acquisitions, num_partitions):
-    ''''
+    '''
     Sort chronological data into assigned gates
 
     Inputs
@@ -293,7 +293,7 @@ if __name__ == '__main__':
 
     ## Get respiratory signal
     raw_resp_signal, timestamps_chronological = extract_respiratory_signal(sorted_chronological_data, start_sample_idx=120, end_sample_idx=150)
-    time_axis_seconds, scan_duration, median_tr, effective_fs =calc_scan_duration_and_TR(timestamps_chronological)
+    time_axis_seconds, scan_duration, median_tr, effective_fs = calc_scan_duration_and_TR(timestamps_chronological)
     TR = 0.006
 
     ## Filter respiratory signal and PCA

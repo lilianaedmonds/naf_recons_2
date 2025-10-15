@@ -36,3 +36,13 @@
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# png files #
+######################
+*.png
+*.gif
+
+
+# pycache #
+######################
+**/__pycache__
