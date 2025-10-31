@@ -20,7 +20,10 @@
 *.rar
 *.tar
 *.zip
-
+*.npz
+*.v
+*.mvf
+*.mat
 # Logs and databases #
 ######################
 *.log

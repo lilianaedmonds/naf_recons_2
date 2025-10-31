@@ -65,6 +65,8 @@ def plot_recons_all_axes(recon, z_idx=None, y_idx=None, x_idx=None,
     """
     Nz, Ny, Nx = recon.shape
 
+    recon = np.abs(recon)
+    
     if z_idx is None:
         z_idx = Nz//2
     if y_idx is None:
@@ -73,10 +75,10 @@ def plot_recons_all_axes(recon, z_idx=None, y_idx=None, x_idx=None,
         x_idx = Nx//2
 
     fig, ax = plt.subplots(1,3, figsize=(15, 5))
-    aspect = Nz/Nx
-    ax[0].imshow(recon[z_idx, :, :], cmap='gray', aspect=1.)
-    ax[1].imshow(np.rot90(recon[:, y_idx, :], k=-3), cmap='gray', aspect=aspect)
-    ax[2].imshow(np.rot90(recon[:, :, x_idx], k=-1), cmap='gray', aspect=aspect)
+    # aspect = Nz/Nx
+    ax[0].imshow(recon[z_idx, :, :], cmap='gray', aspect=Ny/Nx)
+    ax[1].imshow(np.rot90(recon[:, y_idx, :], k=-3), cmap='gray', aspect=Nz/Nx)
+    ax[2].imshow(np.rot90(recon[:, :, x_idx], k=-1), cmap='gray', aspect=Nz/Ny)
     fig.suptitle(f"{title}")
     
     if save_fig:
@@ -88,6 +90,36 @@ def plot_recons_all_axes(recon, z_idx=None, y_idx=None, x_idx=None,
     plt.show()
 
     return fig, ax
+
+
+def crop_xy_dimension(recon, oshape):
+    """"
+    Crop 3D reconstruction to specified oshape
+
+    Inputs
+    --------------------------------------
+    recon : ndarray
+        3D image, shape (nz, ny, nx)
+    oshape : tuple
+        Desired image shape
+
+    Outputs
+    ------------------------------------
+    recon_cropped : ndarray
+        3D image of shape oshape
+    """
+    Nz, Ny, Nx = recon.shape
+
+    new_Nz, new_Ny, new_Nx = oshape
+
+    start_slice = (Nz - new_Nz)//2
+    start_h = (Ny - new_Ny) // 2  # 128
+    start_w = (Nx - new_Nx) // 2  # 128
+
+    # Crop along the last two dimensions
+    recon_cropped = recon[start_slice:start_slice+new_Nz, start_h:start_h+new_Ny, start_w:start_w+new_Nx]
+
+    return recon_cropped
 
 
 def make_gif(images_all, slice_axis, gif_name, slice_idx=None, duration=0.8):
@@ -152,3 +184,51 @@ def make_gif(images_all, slice_axis, gif_name, slice_idx=None, duration=0.8):
         os.remove(filename)
 
     print(f"GIF saved as {gif_name}")
+
+
+
+def plot_center_slices(images_4d):
+    """
+    Plots 3x5 grids of the 15 images at the center slice of each axis.
+    
+    Parameters:
+    -----------
+    images_4d : numpy.ndarray
+        4D array of shape (15, z, y, x)
+    """
+    assert images_4d.ndim == 4 and images_4d.shape[0] == 15, \
+        "Input must be of shape (15, z, y, x)"
+    
+    num_images, z_dim, y_dim, x_dim = images_4d.shape
+    z_center = z_dim // 2
+    y_center = y_dim // 2
+    x_center = x_dim // 2
+
+    # Prepare figure names and corresponding slices
+    views = {
+        "Saggital (center Z)": images_4d[:, z_center, :, :],
+        "Axial (center Y)": images_4d[:, :, y_center, :],
+        "Coronal (center X)": images_4d[:, :, :, x_center]
+    }
+
+    for view_name, view_data in views.items():
+        fig, axes = plt.subplots(3, 5, figsize=(15, 9))
+        fig.suptitle(view_name, fontsize=16)
+
+        for i in range(num_images):
+            ax = axes[i // 5, i % 5]
+
+            if view_name == "Axial (center Y)":
+                view_data_adjust = np.rot90(view_data[i], k=1)
+            elif view_name == "Coronal (center X)":
+                view_data_adjust = np.rot90(view_data[i], k=-1)
+            else:
+                view_data_adjust = view_data[i]
+                
+            ax1, ax2 = view_data_adjust.shape
+            ax.imshow(np.abs(view_data_adjust), cmap="gray", aspect=ax2/ax1)
+            ax.axis("off")
+            ax.set_title(f"Coil {i}")
+
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        plt.show()
