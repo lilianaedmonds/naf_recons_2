@@ -258,6 +258,7 @@ class TotalVariationRecon_Stacked(sp.app.LinearLeastSquares):
         ## Apply NUFFT and regularize from [0,1]
         nufft_sense_stacked = A_sense_stacked.H * ksp
         img = xp.abs(nufft_sense_stacked)
+        ### IMG IS COMPLEX
         nufft_sense_stacked_norm= (img - xp.min(img)) / (xp.max(img) - xp.min(img))
 
         del nufft_sense_stacked
@@ -299,3 +300,21 @@ class TotalVariationRecon_Stacked(sp.app.LinearLeastSquares):
                          z=z, lamda=lamda_quadratic, 
                          tau=tau, sigma=sigma,
                          max_iter=max_iter, max_power_iter=max_power_iter, show_pbar=show_pbar, **kwargs)
+
+
+
+    ### Change initialization of coil estimation
+    ## 1. Get the raw adjoint (complex)
+    # adjoint_img = A_sense_stacked.H * ksp
+
+    # # 2. Find the scalar maximum magnitude
+    # # We use a scalar so we don't shift the phase of individual pixels
+    # mag_max = xp.max(xp.abs(adjoint_img))
+
+    # # 3. Linearly scale the complex image (Preserves Phase)
+    # # We divide the complex number by a real scalar
+    # nufft_sense_stacked_norm = adjoint_img / mag_max
+
+    # # 4. Generate the consistent k-space
+    # # This now has the same phase characteristics as the original ksp
+    # ksp_norm = A_sense_stacked * nufft_sense_stacked_norm

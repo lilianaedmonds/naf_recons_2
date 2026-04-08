@@ -40,7 +40,7 @@ def calculate_rss_image(multichannel_data, coil_axis=0):
     img_rss = np.sqrt(np.sum(np.abs(all_coil_imgs)**2, axis=0))
     return img_rss
 
-def plot_recons_all_axes(recon, z_idx=None, y_idx=None, x_idx=None, 
+def plot_recons_all_axes(recon, z_idx=None, y_idx=None, x_idx=None, column_titles=False, 
                          title="", save_fig=False, output_dir=""):
     """
     Plot single 3D reconstruction across all views
@@ -76,9 +76,15 @@ def plot_recons_all_axes(recon, z_idx=None, y_idx=None, x_idx=None,
 
     fig, ax = plt.subplots(1,3, figsize=(15, 5))
     # aspect = Nz/Nx
-    ax[0].imshow(recon[z_idx, :, :], cmap='gray', aspect=Ny/Nx)
+    ax[0].imshow(np.fliplr(recon[z_idx, :, :]), cmap='gray', aspect=Ny/Nx)
     ax[1].imshow(np.rot90(recon[:, y_idx, :], k=-3), cmap='gray', aspect=Nz/Nx)
     ax[2].imshow(np.rot90(recon[:, :, x_idx], k=-1), cmap='gray', aspect=Nz/Ny)
+
+    if column_titles:
+        ax[0].set_title("Z-axis - LR")
+        ax[1].set_title("Y-axis - SI")
+        ax[2].set_title("X-axis - AP")
+
     fig.suptitle(f"{title}")
     
     if save_fig:
@@ -90,6 +96,58 @@ def plot_recons_all_axes(recon, z_idx=None, y_idx=None, x_idx=None,
     plt.show()
 
     return fig, ax
+
+
+def plot_recon_single_axis(recon, slice_axis, slice_idx=None,
+                           title="", save_fig=False, output_dir=""):
+    """
+    Plot single 3D reconstruction across view specified by slice_idx
+
+    Inputs
+    -------------------------------
+    recon : ndarray
+        3D image
+    slice_axis : int
+        Slice axis to view
+    slice_idx : int
+        Indices to view across axis
+    title : str
+        Title for plot
+    save_fig : bool, Optional
+        Default = False, save figure if true
+    output_dir : str, Optional
+        Set to "", directory to save figure
+
+    Outputs
+    -------------------------------
+    fig, axs: matplotlib objects
+    
+    """
+    Nz, Ny, Nx = recon.shape
+
+    recon = np.abs(recon)
+
+    if slice_idx is None:
+        slice_idx = recon.shape[slice_axis] //2
+
+    # aspect = Nz/Nx
+    if slice_axis==0:
+        plt.imshow(np.fliplr(recon[slice_idx, :, :]), cmap='gray', aspect=Ny/Nx)
+        plt.title(f'{title}')
+    elif slice_axis==1:
+        plt.imshow(np.rot90(recon[:, slice_idx, :], k=-3), cmap='gray', aspect=Nz/Nx)
+        plt.title(f'{title}')
+    elif slice_axis==2:
+        plt.imshow(np.rot90(recon[:, :, slice_idx], k=-1), cmap='gray', aspect=Nz/Ny)
+        plt.title(f'{title}')
+    if save_fig:
+        if output_dir=="":
+            raise Exception("Must provide output directory/filename to save figure.")
+        else:
+            plt.savefig(output_dir)
+    plt.axis('off')
+    plt.show()
+
 
 
 def crop_xy_dimension(recon, oshape):

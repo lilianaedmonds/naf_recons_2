@@ -145,12 +145,18 @@ def grid_kspace(ksp_data, coords, img_shape=None, dcf_weights=None, verbose=True
     ksp_gridded : ndarray
         Gridded ksp of shape (ncoils, Nz, Ny, Nx)
     """
-    ncoils, nslices, nspokes , nsamples = ksp_data.shape
+    if len(ksp_data.shape)==4:
+        ncoils, nslices, nspokes , nsamples = ksp_data.shape
+    elif len(ksp_data.shape)==3:
+        nslices, nspokes , nsamples = ksp_data.shape
+    else:
+        raise TypeError("Kspace data has incorrect shape")
+    
     if img_shape is None:
         img_shape = (nslices, nsamples, nsamples)
-
-    dcf_ksp = dcf.pipe_menon_dcf(coords, img_shape)
-    ksp_gridded = sigpy_gridding(ksp_data*dcf_ksp, coord=coords)
+    if dcf_weights is None:
+        dcf_weights = dcf.pipe_menon_dcf(coords, img_shape)
+    ksp_gridded = sigpy_gridding(ksp_data*dcf_weights, coord=coords)
     if verbose:
         print(f'ksp_gridded.shape = {ksp_gridded.shape}')
     return ksp_gridded

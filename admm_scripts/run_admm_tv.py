@@ -23,7 +23,6 @@ dcf_bins = save_data_helpers.read_pickle('/home/lilianae/projects/naf_clean/reco
 spoke_bins = save_data_helpers.read_pickle('/home/lilianae/projects/naf_clean/load_data_clean/subject2_mid0082/spoke_bins_phil_gating.pkl')
 mps = save_data_helpers.read_pickle('/home/lilianae/projects/naf_clean/coils/subject2_mid0082/espirit_mps_full_res_ksp_512_ungated.pkl')
 
-
 num_gates = len(data_bins)
 data_bins_with_dcf = [None] * num_gates
 
@@ -32,6 +31,21 @@ for gate in range(num_gates):
     data_bins_with_dcf[gate] = data_bins[gate] * dcf_bins[gate]
     print(f'Data bins w/ dcf shape = {data_bins_with_dcf[gate].shape}')
     print(f'coords shape = {spoke_bins[gate].shape}')
+
+
+#%% Select certain coils
+ksp_gates_5coils = [None] * num_gates
+for gate in range(num_gates):
+    coils_select = [1, 8, 9, 10, 13]
+    ksp_coil_select = [data_bins_with_dcf[gate][i] for i in coils_select]
+    ksp_coil_select = np.stack(ksp_coil_select, axis=0)
+    ksp_gates_5coils[gate] = ksp_coil_select
+    print(f'ksp_coil_select.shape = {ksp_coil_select.shape}')
+
+
+mps_coil_select = [mps[i] for i in coils_select]
+mps_coil_select = np.stack(mps_coil_select, axis=0)
+print(f'mps_coil_select.shape = {mps_coil_select.shape}')
 
 
 #%% Select certain coils

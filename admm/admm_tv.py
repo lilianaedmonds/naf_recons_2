@@ -166,6 +166,18 @@ def admm_mr(ksp_gates, mps, coord_gates, img_shape,
 
         print(f'Saved {out_file}')
 
+    def save_iteration_cost_npz(data_fidelity, prior):
+        '''Save cost function data to one .npz file'''
+        os.makedirs(iter_dir, exist_ok=True)
+        out_file = os.path.join(iter_dir, f'iter_{i_outer:03d}_costs.npz')
+        np.savez_compressed(
+            out_file,
+            data_fidelity=to_numpy(data_fidelity),
+            prior= to_numpy(prior)
+        )
+
+        print(f'Saved {out_file}')
+
 
     # help function to create interpolation operators:
     def motion_vec_field_2_op_list(mvf,m):
@@ -210,6 +222,8 @@ def admm_mr(ksp_gates, mps, coord_gates, img_shape,
     sigma_pdhg = 1.0
 
     # bool whether to solve the original or approximated subproblem (2)
+    ## Changed to False to see if it improves convergence
+    ## CHANGE BACK
     use_subproblem2_approx = True
 
     # random seed
@@ -226,21 +240,20 @@ def admm_mr(ksp_gates, mps, coord_gates, img_shape,
         ind_recons = cp.zeros((num_gates, *img_shape), dtype=cp.complex64)
 
         if do_pre_initialization:
-            ind_recons = read_pickle('/home/lilianae/projects/naf_clean/recons/subject2_mid0082/tv_code/ind_recons_phil_gates.pkl')
-            # for i in range(num_gates):
-            #     print(f"\rPre-initialization: TV recon for gate {i}/{num_gates}", end='', flush=True)
-            #     print()
-            #     tv_preinit_alg =TotalVariationRecon_Custom(y=ksp_gates[i],
-            #                                        mps=mps,
-            #                                        lamda=tv_lamda, 
-            #                                        coord=coord_gates[i],
-            #                                        device=device,
-            #                                        z=None, 
-            #                                        max_iter=tv_max_iter,
-            #                                        max_power_iter=10,
-            #                                        show_pbar=True)
-            #     ind_recons[i, ...] = tv_preinit_alg.run()
-            #     del tv_preinit_alg
+            for i in range(num_gates):
+                print(f"\rPre-initialization: TV recon for gate {i}/{num_gates}", end='', flush=True)
+                print()
+                tv_preinit_alg =TotalVariationRecon_Stacked(y=ksp_gates[i],
+                                                   mps=mps,
+                                                   lamda=tv_lamda, 
+                                                   coord=coord_gates[i],
+                                                   device=device,
+                                                   z=None, 
+                                                   max_iter=tv_max_iter,
+                                                   max_power_iter=10,
+                                                   show_pbar=True)
+                ind_recons[i, ...] = tv_preinit_alg.run()
+                del tv_preinit_alg
 
             save_data(ind_recons,'indep_recons',0)
 
@@ -378,32 +391,6 @@ def admm_mr(ksp_gates, mps, coord_gates, img_shape,
                     ksp_norm_all[i] = tv_recon.ksp_norm
                     del tv_recon
                     del z_target
-                # print(f"\rGate {i+1}/{num_gates}: TV reconstruction", end='', flush=True)
-                # print()
-
-                # ## Run TV recons
-                # z_target = Ss[i](lam) - us[i,...]
-
-                # # TV reconstruction WITH quadratic penalty term
-                # tv_recon = TotalVariationRecon_Custom(
-                #     y=ksp_gates[i],
-                #     mps=mps,
-                #     x=zs[i],
-                #     lamda=tv_lamda,           # TV regularization
-                #     coord=coord_gates[i],
-                #     device=device,
-                #     z=z_target,                # ADMM coupling target
-                #     lamda_quadratic=rho,       
-                #     tau = tau_gates[i],
-                #     sigma=sigma,
-                #     max_iter=tv_max_iter,
-                #     show_pbar=True
-                # )
-                
-                # zs[i, ...] = tv_recon.run()
-                # ksp_norm_all[i] = tv_recon.ksp_norm
-                # del tv_recon
-                # del z_target
 
 
 
@@ -468,7 +455,7 @@ def admm_mr(ksp_gates, mps, coord_gates, img_shape,
                 # optimize the exact subproblem (2) which requires knowledge of the
                 # adjoint of the motion deformation operators
 
-                Ss = sp.linop.Vstack(Ss)
+                Ss_stacked = sp.linop.Vstack(Ss)
                 y = (us + zs).ravel()
 
                 # we could call LinearLeastSquares directly, but we will use call the
@@ -476,7 +463,7 @@ def admm_mr(ksp_gates, mps, coord_gates, img_shape,
                 # for warm start of the following iteration
 
                 # run PDHG to solve subproblem (2)
-                A = sp.linop.Vstack([Ss, G])
+                A = sp.linop.Vstack([Ss_stacked, G])
                 proxfc = sp.prox.Stack(
                     [sp.prox.L2Reg(y.shape, 1, y=-y),
                     sp.prox.Conj(proxg2)])
@@ -500,7 +487,8 @@ def admm_mr(ksp_gates, mps, coord_gates, img_shape,
                     alg2.update()
 
                 lam = alg2.x
-
+                
+                del Ss_stacked
 
             ###################################################################
             # UPDATE DUAL VARIABLES IF MOTION_BASE=Z
@@ -569,6 +557,9 @@ def admm_mr(ksp_gates, mps, coord_gates, img_shape,
                 data_fidelity[i] = float(0.5 * (e.conj() * e).sum().real)
 
             cost[i_outer] = data_fidelity.sum() + beta * prior
+
+            save_iteration_cost_npz(data_fidelity=data_fidelity, prior=prior)
+            
             with open(os.path.join(output_dir,'cost.json'),'w') as f:
                 json.dump({'cost':cost.tolist()},f)
 

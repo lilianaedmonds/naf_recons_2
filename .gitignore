@@ -7,6 +7,7 @@
 *.o
 *.so
 *.pkl
+*.p
 
 # Packages #
 ############
@@ -44,6 +45,7 @@ Thumbs.db
 ######################
 *.png
 *.gif
+*.nii
 
 
 # pycache #

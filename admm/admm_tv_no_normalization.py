@@ -3,27 +3,86 @@ import os
 import numpy as np
 import cupy as cp
 import json
-
-
-import sigpy
 import sigpy as sp
-from sigpy.mri.app import TotalVariationRecon, L1WaveletRecon
+import gc
 
 from copy import deepcopy
-#sys.path.insert(0,os.path.split(os.path.split(__file__)[0])[0])
+from save_data_helpers import read_pickle, write_pickle
+from custom_recons.tv_no_norm import TotalVariationRecon_NoNorm_Stacked
 
-def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, rho, beta, target_gate_index, output_dir, device, do_pre_initialization=True,num_iter=15,motion_base='zu_lam'):
+# sys.path.insert(0,os.path.split(os.path.split(__file__)[0])[0])
+def _stacked_nufft_operator_sens(img_shape, coords, mps):
+    """setup a stacked 2D NUFFT sp operator acting on a 3D image
+       the opeator first performs a 1D FFT along the "z" axis (0 or left-most axis)
+       followed by applying 2D NUFFTS to all "slices"
+       
+    Parameters
+    ----------
+        img_shape: tuple
+            shape of the image
+        coords: (numpy or cupy) array 
+            coordinates of the k-space samples
+            shape (n_k_space_points,2)
+            units: "unitless" -> -N/2 ... N/2 at Nyquist (sp convention)
+        mps: (numpy or cupy) array
+            sensitivity maps of shape (num_channels, *img_shape)
+
+    Returns
+    -------
+        Diag: a stack of NUFFT operators
+    """
+
+    num_channels = len(mps)
+
+    ft0_op = sp.linop.FFT(img_shape, axes=(0, ))
+
+    # setup a 2D NUFFT operator for the start
+    nufft_op = sp.linop.NUFFT(img_shape[1:], coords)
+
+
+    # reshaping operator for input
+    rs_in = sp.linop.Reshape(img_shape[1:], (1, ) + img_shape[1:])
+    # setup a list of "n" 2D NUFFT operators (one per slice)
+    ops = []
+    for i in range(img_shape[0]):
+        coords_i = coords[i].reshape(-1, coords.shape[-1])[:, 1:]  # (400*512, 2)
+        nufft_op_i = sp.linop.NUFFT(img_shape[1:], coords_i)
+        # Reshape NUFFT output from flat to 2D: (400*512,) -> (400, 512)
+        rs_nufft = sp.linop.Reshape((coords.shape[1], coords.shape[2]), nufft_op_i.oshape)
+        rs_out_i = sp.linop.Reshape((1, coords.shape[1], coords.shape[2]), (coords.shape[1], coords.shape[2]))
+        ops.append(rs_out_i * rs_nufft * nufft_op_i * rs_in)
+
+
+    # apply 2D NUFFTs to all "slices" using the sp Diag operator
+    full_op= sp.linop.Diag(ops, iaxis=0, oaxis=0) * ft0_op
+    #### Combine Sensitivity Op (mult with sens) and respective ft0+nuFFT op:
+
+    #sensitivity = np.ones((num_channels,*img_shape),dtype=np.complex64)
+    S = sp.linop.Multiply(img_shape,mps)
+
+    rs_in_sense = sp.linop.Reshape(img_shape,(1,)+img_shape)
+    rs_out_sense = sp.linop.Reshape((1,)+tuple(full_op.oshape),full_op.oshape)
+    return  sp.linop.Diag(num_channels*[rs_out_sense*full_op*rs_in_sense],iaxis=0,oaxis=0)*S
+
+def admm_mr(ksp_gates, mps, coord_gates, img_shape,
+            tv_lamda, tv_max_iter, motion_est_fun, motion_inv_fun, 
+            motion_parms, rho, beta, target_gate_index, output_dir, device, 
+            do_pre_initialization=True,num_iter=15,motion_base='zu_lam'):
     """"
     Joint Reconstruction of Motion and Image Data using ADMM
     
     Parameters
     ----------
-    ds: list 
-        kspace data
+    ksp_gates: list 
+        Gated kspace data
     Fs: list
         Fourier ops for ds
     img_shape: tuple
         shape of the image(s)
+    coord_gates : list
+        Gated non-cartesian coords for ksp gates
+    tv_lamda : float
+        Regularization param
     motion_est_fun: func
         Function to estimate motion
     motion_inv_fun: func
@@ -50,13 +109,16 @@ def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, 
             'z':      align (z_k) and (z_target)
 
     """
-   
     # Conventions:
     # 1) the gate dimension comes first in all ndarrays [followed by spatial (x,y,z) [and by vector component dim for motion vector fields]]
     # 1a)      For storage, though, the gate dim has to be moved to the last position (for image viewers)
     # 2) All fields are cupy, except motion vector fields are numpy (for now)
     # 2a) all motion functions will take cupy fields and convert them to numpy
     # 2b) motion fields are returned as numpy
+
+    ###################################################################
+    # SAVE DATA: All functions for saving ADMM outputs
+    ###################################################################
     
     # write parms to output dir:
     with open(os.path.join(output_dir,'parm.json'),'w') as f:
@@ -77,8 +139,6 @@ def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, 
             with open(os.path.join(output_dir,filename+'_{:03d}_compl.v'.format(iter_num)),'wb') as f:
                 f.write(np.reshape(tmp,-1,order='F').astype(np.complex64))
 
-
-    ## ADDED: CLEANER FUNCTIONS TO SAVE ITERATION DATA AS ONE: ##############
     def to_numpy(x):
         """Convert either a numpy or cupy array to a numpy array."""
         # Cupy ndarray check (avoid importing cupy here if not available)
@@ -107,7 +167,18 @@ def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, 
 
         print(f'Saved {out_file}')
 
-    ##################################################################################
+    def save_iteration_cost_npz(data_fidelity, prior):
+        '''Save cost function data to one .npz file'''
+        os.makedirs(iter_dir, exist_ok=True)
+        out_file = os.path.join(iter_dir, f'iter_{i_outer:03d}_costs.npz')
+        np.savez_compressed(
+            out_file,
+            data_fidelity=to_numpy(data_fidelity),
+            prior= to_numpy(prior)
+        )
+
+        print(f'Saved {out_file}')
+
 
     # help function to create interpolation operators:
     def motion_vec_field_2_op_list(mvf,m):
@@ -142,7 +213,7 @@ def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, 
     #--------------------------------------------------------------------
    
 
-    num_gates = len(ds)
+    num_gates = len(ksp_gates)
    
     
     do_wo_moco_recon=False
@@ -152,6 +223,8 @@ def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, 
     sigma_pdhg = 1.0
 
     # bool whether to solve the original or approximated subproblem (2)
+    ## Changed to False to see if it improves convergence
+    ## CHANGE BACK
     use_subproblem2_approx = True
 
     # random seed
@@ -161,33 +234,27 @@ def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, 
     
 
     with cp.cuda.Device(device):
+        ###################################################################
+        # PRE-INITIALIZATION: Independent TV reconstructions
+        ###################################################################
 
-        ## Initialize array for indep_recons:
         ind_recons = cp.zeros((num_gates, *img_shape), dtype=cp.complex64)
-
-        ## For L1, we need:
-        wave_name='db4'
-        lamda_l1 = beta
-        W = sp.linop.Wavelet(img_shape, wave_name=wave_name)
-        proxg = sp.prox.UnitaryTransform(sp.prox.L1Reg(W.oshape, lamda_l1), W)
-   
-        def g(input):
-            device = sp.get_device(input)
-            xp = device.xp
-            with device:
-                return lamda_l1 * xp.sum(xp.abs(W(input))).item()
-
 
         if do_pre_initialization:
             for i in range(num_gates):
-                alg0 = sp.app.LinearLeastSquares(Fs[i],
-                                                 sp.to_device(ds[i], device),
-                                                 proxg=proxg, g=g, 
-                                                 max_iter=500)
-                
-                
-                ind_recons[i, ...] = alg0.run()
-                del alg0
+                print(f"\rPre-initialization: TV recon for gate {i}/{num_gates}", end='', flush=True)
+                print()
+                tv_preinit_alg =TotalVariationRecon_NoNorm_Stacked(y=ksp_gates[i],
+                                                   mps=mps,
+                                                   lamda=tv_lamda, 
+                                                   coord=coord_gates[i],
+                                                   device=device,
+                                                   z=None, 
+                                                   max_iter=tv_max_iter,
+                                                   max_power_iter=10,
+                                                   show_pbar=True)
+                ind_recons[i, ...] = tv_preinit_alg.run()
+                del tv_preinit_alg
 
             save_data(ind_recons,'indep_recons',0)
 
@@ -218,93 +285,98 @@ def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, 
             
             del tmp_mvf, tmp_mvf_inv
 
+        else:
+            # Initialize with zeros (same as original)
+            lam = cp.zeros(img_shape, dtype=cp.complex64)
+            zs = cp.zeros((num_gates, *img_shape), dtype=cp.complex64)
+            Ss = motion_vec_field_2_op_list(np.zeros((num_gates,*img_shape,3)), img_shape)
+            Ss_inv = motion_vec_field_2_op_list(np.zeros((num_gates,*img_shape,3)), img_shape)
+            us = cp.zeros_like(zs)
 
 
         #--------------------------------------------------------------------
         #--------------------------------------------------------------------
         # reconstruction of all the data without motion modeling as reference
-        # Can't do this yet
         #--------------------------------------------------------------------
         #--------------------------------------------------------------------
-        if do_wo_moco_recon:
+        # if do_wo_moco_recon:
 
-            alg0 = sigpy.app.LinearLeastSquares(sigpy.linop.Vstack(Fs),
-                                                sp.to_device(cp.concatenate([x.ravel() for x in ds]),device),
-                                                proxg=proxg, g=g, 
-                                                max_iter=500)
-            recon_wo_moco = alg0.run()
-            del alg0
+            # tv_no_moco= TotalVariationRecon_Custom(y=cp.concatenate([x.ravel() for x in ksp_gates]),
+            #                                        mps=mps, lamda=tv_lamda, 
+            #                                        coord=cp.concatenate([c.ravel() for c in coord_gates]),
+            #                                        device=device,
+            #                                        z=None,
+            #                                        max_iter=500,
+            #                                        show_pbar=True
+            #                                     )
+            # recon_wo_moco = tv_no_moco.run()
+            # del recon_wo_moco
 
-            save_data(recon_wo_moco,'non_mc_recon',0)
+            # save_data(recon_wo_moco,'non_mc_recon',0)
 
-        #--------------------------------------------------------------------
-        #--------------------------------------------------------------------
-        # ADMM
-        #--------------------------------------------------------------------
-        #--------------------------------------------------------------------
-        
-        # prox for subproblem 2 - note extra (1/rho) which is needed for subproblem 2, approximate subproblem 2
-        # gradient operator, factor in front makes sure that |G| = 1
-        try:
-            max_eig_W = sigpy.app.MaxEig(W.H * W, dtype=cp.complex64, max_iter=30).run()
-            W_normalized = (1 / np.sqrt(max_eig_W)) * W
-        except:
-            # Wavelets are typically already well-conditioned
-            W_normalized = W
-        
-        # prox for subproblem 2 - using WAVELET regularization consistently
-        proxg2 = sp.prox.UnitaryTransform(sp.prox.L1Reg(W_normalized.oshape, beta / rho), W_normalized)
-        proxg2a = sp.prox.UnitaryTransform(sp.prox.L1Reg(W_normalized.oshape, beta / (num_gates * rho)), W_normalized)
 
-        # initialize all variables
-        
+        ###################################################################
+        # ADMM ITERATIONS
+        ###################################################################
+
+        # Initialize ADMM variables
         if do_pre_initialization:
             lam = ind_recons[target_gate_index, ...].copy()
             zs = ind_recons.copy()
             us = cp.zeros_like(zs)
-            # for i in range(num_gates):
-            #     us[i] = us[i] + zs[i] - Ss[i](lam)
-        else:
-            # init lambda, z, S, S^-1 with zeros
-            lam = cp.zeros(img_shape,dtype=cp.complex64)
-            zs = cp.zeros((num_gates, *img_shape), dtype=cp.complex64)
-            #Ss_tmp = np.zeros((*img_shape,3,num_gates))
-            #Ss = mvf_array_2_op_list(Ss_tmp,img_shape)
-            Ss = motion_vec_field_2_op_list(np.zeros((num_gates,*img_shape,3)), img_shape)
 
-            
-            #Ss_inv = mvf_array_2_op_list(Ss_inv_tmp,img_shape)
-            Ss_inv = motion_vec_field_2_op_list(np.zeros((num_gates,*img_shape,3)), img_shape)
-            us = cp.zeros_like(zs)
-            print('after no init:')
-            print(zs.shape)
-            print(len(Ss))
-            #print(S[0].shape)
         cost = np.zeros(num_iter)
 
-        #recons = np.zeros((num_iter, *img_shape), dtype=cp.complex64)
 
+        G = sp.linop.Gradient(img_shape)
+        max_eig_G = sp.app.MaxEig(G.H * G, dtype=cp.complex64, max_iter=30).run()
+        G_normalized = (1 / np.sqrt(max_eig_G)) * G
 
         for i_outer in range(num_iter):
+            print(f"\n{'='*60}")
+            print(f"ADMM Iteration {i_outer+1}/{num_iter}")
+            print(f"{'='*60}")
+            
             ###################################################################
-            # subproblem (1) - data fidelity + quadratic - update for z1 and z2
+            # SUBPROBLEM (1): TV reconstruction with quadratic coupling
             ###################################################################
 
             for i in range(num_gates):
-                alg1 = sp.app.LinearLeastSquares(Fs[i], 
-                                                 sp.to_device(ds[i],device),
-                                                 x = zs[i],
-                                                 lamda = rho,
-                                                 proxg=proxg, g=g, 
-                                                 z = (Ss[i](lam) - us[i,...]))
-                zs[i, ...] = alg1.run()
-                del alg1
+                z_target = Ss[i](lam) - us[i, ...]
+                
+                tv_recon = TotalVariationRecon_NoNorm_Stacked(
+                    y=ksp_gates[i],
+                    mps=mps,
+                    lamda=tv_lamda,
+                    coord=coord_gates[i],
+                    device=device,
+                    z=z_target,
+                    lamda_quadratic=rho,
+                    tau=None,              # Let it compute
+                    sigma=None,            # Let it compute
+                    max_iter=tv_max_iter,
+                    max_power_iter=30,     # Full computation for first gate
+                    show_pbar=True
+                )
+                
+                zs[i, ...] = tv_recon.run()
+                del tv_recon
+                del z_target
 
-            # save_data(zs,'z',i_outer)
+                gc.collect()
+                cp.get_default_memory_pool().free_all_blocks()
 
             ###################################################################
-            # subproblem (2) - optimize lambda
+            # SUBPROBLEM (2): Update lambda (virtual gate)
             ###################################################################
+
+            G = G_normalized
+
+            # prox for subproblem 2 - note extra (1/rho) which is needed for subproblem 2
+            proxg2 = sp.prox.L1Reg(G.oshape, beta / rho)
+            # prox for subproblem 2 - note extra (1/rho) which is needed for the approximate subproblem 2
+            proxg2a = sp.prox.L1Reg(G.oshape, beta / (num_gates * rho))
+
             # MF:
             # invert Ss
             if use_subproblem2_approx:
@@ -328,13 +400,13 @@ def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, 
                 v /= num_gates
 
                 if i_outer == 0:
-                    pdhg_u2a = cp.zeros(W_normalized.oshape, dtype=lam.dtype)
+                    pdhg_u2a = cp.zeros(G.oshape, dtype=lam.dtype)
 
-                alg2a = sigpy.alg.PrimalDualHybridGradient(
-                    proxfc=sigpy.prox.Conj(proxg2a),
-                    proxg=sigpy.prox.L2Reg(img_shape, 1, y=v),
-                    A=W_normalized,
-                    AH=W_normalized.H,
+                alg2a = sp.alg.PrimalDualHybridGradient(
+                    proxfc=sp.prox.Conj(proxg2a),
+                    proxg=sp.prox.L2Reg(img_shape, 1, y=v),
+                    A=G,
+                    AH=G.H,
                     x=deepcopy(lam),
                     u=pdhg_u2a,
                     tau=1 / sigma_pdhg,
@@ -348,7 +420,7 @@ def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, 
                 # optimize the exact subproblem (2) which requires knowledge of the
                 # adjoint of the motion deformation operators
 
-                Ss_stacked = sigpy.linop.Vstack(Ss)
+                Ss_stacked = sp.linop.Vstack(Ss)
                 y = (us + zs).ravel()
 
                 # we could call LinearLeastSquares directly, but we will use call the
@@ -356,19 +428,19 @@ def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, 
                 # for warm start of the following iteration
 
                 # run PDHG to solve subproblem (2)
-                A = sigpy.linop.Vstack([Ss_stacked, W_normalized])
-                proxfc = sigpy.prox.Stack(
-                    [sigpy.prox.L2Reg(y.shape, 1, y=-y),
-                    sigpy.prox.Conj(proxg2)])
+                A = sp.linop.Vstack([Ss_stacked, G])
+                proxfc = sp.prox.Stack(
+                    [sp.prox.L2Reg(y.shape, 1, y=-y),
+                    sp.prox.Conj(proxg2)])
 
                 if i_outer == 0:
-                    max_eig = sigpy.app.MaxEig(A.H * A, dtype=y.dtype,
+                    max_eig = sp.app.MaxEig(A.H * A, dtype=y.dtype,
                                             max_iter=30).run()
                     pdhg_u = cp.zeros(A.oshape, dtype=y.dtype)
 
-                alg2 = sigpy.alg.PrimalDualHybridGradient(
+                alg2 = sp.alg.PrimalDualHybridGradient(
                     proxfc=proxfc,
-                    proxg=sigpy.prox.NoOp(A.ishape),
+                    proxg=sp.prox.NoOp(A.ishape),
                     A=A,
                     AH=A.H,
                     x=deepcopy(lam),
@@ -380,20 +452,23 @@ def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, 
                     alg2.update()
 
                 lam = alg2.x
-
-            
-            # save_data(lam,'lambda',i_outer)
-            
-
-
-            
+                
+                del Ss_stacked
 
             ###################################################################
-            # update of displacement fields (motion operators) based on z1, z2
+            # UPDATE DUAL VARIABLES IF MOTION_BASE=Z
+            ###################################################################
+            # If motion is estimated on the 'z' only, the 'u' should be updated before motion estimation:
+            if motion_base=='z':
+                # Leave the u update here for now:
+                for i in range(num_gates):
+                    us[i] = us[i] + zs[i] - Ss[i](lam)
+
+        
+            ###################################################################
+            # UPDATE MOTION FIELDS
             ###################################################################
 
-           
-            # motion_est_fun(target_data, gate_data, parms, skip_idx=-1)
 
             # i) estimate motion
             if motion_base=='zu_lam':   # align (lam) and (z_k+u_k):
@@ -418,34 +493,10 @@ def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, 
             # move gate axis to last position for storage
             S_to_save = np.reshape(np.moveaxis(tmp_mvf,0,-1),-1,order='F').astype(np.float32)
             S_inv_to_save = np.reshape(np.moveaxis(tmp_mvf_inv,0,-1),-1,order='F').astype(np.float32)
-            
-            # move gate axis to last position for storage
-            # with open(os.path.join(output_dir,'S_inv_{:03d}.v'.format(i_outer)),'wb') as f:
-            #     f.write(np.reshape(np.moveaxis(tmp_mvf_inv,0,-1),-1,order='F').astype(np.float32))
-            # with open(os.path.join(output_dir,'S_{:03d}.v'.format(i_outer)),'wb') as f:
-            #     f.write(np.reshape(np.moveaxis(tmp_mvf,0,-1),-1,order='F').astype(np.float32))
-            
-            # del tmp_mvf, tmp_mvf_inv
 
-                        
-            ###################################################################
-            # update of dual variables
-            ###################################################################
-
-            # If motion is estimated on the 'z+u' and 'lam', update of the 'u' should come 
-            # after motion estimation:
-            # if motion_base=='zu_lam':
-            #     for i in range(num_gates):
-            #         us[i] = us[i] + zs[i] - Ss[i](lam)
-            #     save_data(us,'u',i_outer)
-
-            # If motion is estimated on the 'z' only, the 'u' should be updated before motion estimation:
-            #if motion_base=='z':
-            # Leave the u update here for now:
-            for i in range(num_gates):
-                us[i] = us[i] + zs[i] - Ss[i](lam)
-            save_data(us,'u',i_outer)
-
+            if motion_base=='zu_lam':
+                for i in range(num_gates):
+                    us[i] = us[i] + zs[i] - Ss[i](lam)
 
             iter_dir =os.path.join(output_dir, "iters")
             save_iteration_npz(iter_dir, i_outer, zs, lam, us, S_to_save, S_inv_to_save)
@@ -457,21 +508,32 @@ def admm_mr_l1(ds, Fs, img_shape, motion_est_fun, motion_inv_fun, motion_parms, 
             
 
             # evaluate the cost function
-            prior = float(cp.sum(cp.abs(W(lam))).real)
+            prior = float(cp.abs(G(lam)).sum().get())
 
             data_fidelity = np.zeros(num_gates)
 
+
             for i in range(num_gates):
-                e = Fs[i](Ss[i](lam)) - sigpy.to_device(ds[i],device)
+
+                A_sense_stacked = _stacked_nufft_operator_sens(img_shape=img_shape,
+                                                           coords=coord_gates[i], mps=mps)
+
+                e = A_sense_stacked(Ss[i](lam)) - sp.to_device(ksp_gates[i],device)
                 data_fidelity[i] = float(0.5 * (e.conj() * e).sum().real)
 
             cost[i_outer] = data_fidelity.sum() + beta * prior
+
+            save_iteration_cost_npz(data_fidelity=data_fidelity, prior=prior)
+            
             with open(os.path.join(output_dir,'cost.json'),'w') as f:
                 json.dump({'cost':cost.tolist()},f)
 
-          
-        with open(os.path.join(output_dir,'cost.json'),'w') as f:
-            json.dump({'cost': cost.tolist()},f) 
+            cp._default_memory_pool.free_all_blocks()
+ 
+
+            
+
+
 
             
 

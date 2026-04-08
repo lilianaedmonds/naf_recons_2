@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "debug in venv",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "python": "/home/lilianae/mambaforge/envs/jointrecon_env_backup_new/bin/python"
+        }
+    ]
+}

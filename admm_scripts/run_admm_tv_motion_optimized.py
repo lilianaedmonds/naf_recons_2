@@ -19,9 +19,9 @@ import save_data_helpers
 
 #%% Load all data
 
-data_bins = save_data_helpers.read_pickle('/home/lilianae/projects/naf_clean/load_data_clean/subject2_mid0082/data_bins_phil_gating.pkl')
-dcf_bins = save_data_helpers.read_pickle('/home/lilianae/projects/naf_clean/recons/subject2_mid0082/dcf_ksp_phil_gating_512_5gates.pkl')
-spoke_bins = save_data_helpers.read_pickle('/home/lilianae/projects/naf_clean/load_data_clean/subject2_mid0082/spoke_bins_phil_gating.pkl')
+data_bins = save_data_helpers.read_pickle('/home/lilianae/projects/naf_clean/load_data_clean/subject2_mid0082/data_bins_400sp_phil_gating.pkl')
+dcf_bins = save_data_helpers.read_pickle('/home/lilianae/projects/naf_clean/recons/subject2_mid0082/dcf_ksp_400sp_phil_gating_512_5gates.pkl')
+spoke_bins = save_data_helpers.read_pickle('/home/lilianae/projects/naf_clean/load_data_clean/subject2_mid0082/spoke_bins_400sp_phil_gating.pkl')
 mps = save_data_helpers.read_pickle('/home/lilianae/projects/naf_clean/coils/subject2_mid0082/espirit_mps_full_res_ksp_512_ungated.pkl')
 
 
@@ -49,12 +49,11 @@ mps_coil_select = [mps[i] for i in coils_select]
 mps_coil_select = np.stack(mps_coil_select, axis=0)
 print(f'mps_coil_select.shape = {mps_coil_select.shape}')
 
-
 #%% Set ADMM parameters
 
-beta = 0.0001
-rho = 0.01
-tv_lamda=1e-3
+beta = 5e-3
+rho = 1e-2
+tv_lamda=7e-3
 
 parms = {}
 parms['demons']='diffeomorphic'
@@ -62,7 +61,7 @@ parms['scaling']=[[4,4,1],[2,2,1]]
 parms['scaling_sigmas']=[8,4]
 
 parms['intensitythreshold']=0.001
-parms['smoothing']=2
+parms['smoothing']=3
 
 parms['spacing']=(1.172, 1.172, 5.0)
 parms['normalization']=[]
@@ -71,12 +70,13 @@ parms['normalization']=[]
 #%% ADMM
 target_gate_index = 2
 img_shape = (58, 512, 512)
-device = 0
+device = 2
+num_iter = 8
 
-output_base_path = '/home/lilianae/projects/naf_clean/admm_results'
+output_base_path = '/data/lilianae/ADMM_results/'
 
 # Set output path
-output_path = os.path.join(output_base_path,f'mini_admm_z_base_rho_{rho}_beta_{beta}_3iters')
+output_path = os.path.join(output_base_path,f'mini_admm_400sp_5coils_z_rho_{rho}_beta_{beta}_lam_{tv_lamda}_{num_iter}iters')
 if not os.path.exists(output_path):
     os.makedirs(output_path)
 
@@ -85,7 +85,7 @@ admm_mr(ksp_gates=ksp_gates_5coils,
         coord_gates=spoke_bins,
         img_shape=img_shape,
         tv_lamda=tv_lamda,
-        tv_max_iter=30,
+        tv_max_iter=40,
         motion_est_fun=motion_fun_demons_gatewise, 
         motion_inv_fun=invert_mvf_gatewise, 
         motion_parms=parms,
@@ -93,7 +93,7 @@ admm_mr(ksp_gates=ksp_gates_5coils,
         output_dir=output_path,
         device=device,
         do_pre_initialization=True,
-        num_iter=15,
+        num_iter=num_iter,
         motion_base='z')
 
 

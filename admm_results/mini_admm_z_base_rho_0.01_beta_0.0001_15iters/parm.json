@@ -1,1 +1,0 @@
-{"rho": 0.01, "beta": 0.0001, "target_gate_index": 2, "motion_est_fun": "motion_fun_demons_gatewise", "motion_parms": {"demons": "diffeomorphic", "scaling": [[4, 4, 1], [2, 2, 1]], "scaling_sigmas": [8, 4], "intensitythreshold": 0.001, "smoothing": 2, "spacing": [1.172, 1.172, 5.0], "normalization": []}, "do_pre_initialization": true}

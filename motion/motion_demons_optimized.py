@@ -30,7 +30,7 @@ except ModuleNotFoundError:
 
 def motion_fun_demons_gatewise(target_gate, floating_gates, parms, target_gate_idx):
     """
-    Compute motion using Demons - GATE-WISE BATCHING
+    Compute motion using Demons with GATE-WISE BATCHING
     
     Processes one gate at a time instead of all gates simultaneously.
     Maintains full 3D spatial coherence for each registration.
@@ -50,13 +50,13 @@ def motion_fun_demons_gatewise(target_gate, floating_gates, parms, target_gate_i
     num_gates = floating_gates.shape[0]
     img_shape = target_gate.shape
     
-    # Initialize output
+    ## Initialize output
     mvf_full = np.zeros((num_gates, *img_shape, 3), dtype=np.float32)
     
-    # Convert target once
+    ## Convert target once
     target_np = cp.asnumpy(target_gate) if isinstance(target_gate, cp.ndarray) else target_gate
     
-    # Setup demons filter once
+    ## Setup demons filter once
     if parms['demons'] == 'diffeomorphic':
         demons_filter = sitk.DiffeomorphicDemonsRegistrationFilter()
     elif parms['demons'] == 'vanilla':
@@ -71,11 +71,11 @@ def motion_fun_demons_gatewise(target_gate, floating_gates, parms, target_gate_i
     
     spacing = parms['spacing']
     
-    # Convert target to SimpleITK
+    ## Convert target to SimpleITK
     sitk_target = sitk.GetImageFromArray(target_np)
     sitk_target.SetSpacing(spacing)
     
-    # Process each gate independently
+    ## Process each gate independently
     for gate_idx in range(num_gates):
         if gate_idx == target_gate_idx:
             mvf_full[gate_idx] = 0  # No motion for target gate
@@ -83,10 +83,10 @@ def motion_fun_demons_gatewise(target_gate, floating_gates, parms, target_gate_i
         
         print(f"  Motion estimation: gate {gate_idx+1}/{num_gates}")
         
-        # Convert this gate to numpy (releases GPU memory immediately)
+        ## Convert this gate to numpy (releases GPU memory immediately)
         floating_np = cp.asnumpy(floating_gates[gate_idx]) if isinstance(floating_gates[gate_idx], cp.ndarray) else floating_gates[gate_idx]
         
-        # Convert to SimpleITK
+        ## Convert to SimpleITK
         sitk_floating = sitk.GetImageFromArray(floating_np)
         sitk_floating.SetSpacing(spacing)
         
@@ -99,86 +99,22 @@ def motion_fun_demons_gatewise(target_gate, floating_gates, parms, target_gate_i
             smoothing_sigmas=parms['scaling_sigmas']
         )
         
-        # Extract displacement field
+        ## Extract displacement field
         tmp_mvf = sitk.GetArrayFromImage(tx.GetDisplacementField())
         
-        # Reorder dimensions (SimpleITK: z,y,x,vec -> we want x,y,z order)
+        ## Reorder dimensions (SimpleITK: z,y,x,vec -> we want x,y,z order)
         mvf_full[gate_idx] = tmp_mvf[:, :, :, [2, 1, 0]]
         
-        # Unscale MVF
+        ## Unscale MVF
         for dim in range(3):
             mvf_full[gate_idx, ..., dim] /= spacing[dim]
         
-        # Clean up
+        ## Clean up
         del floating_np, sitk_floating, tmp_mvf, tx
         gc.collect()
     
     return mvf_full
 
-
-def motion_fun_demons_downsampled(target_gate, floating_gates, parms, target_gate_idx, downsample_factor=2):
-    """
-    Estimate motion on downsampled images, upsample motion fields
-    
-    Args:
-        downsample_factor: 2 (safe, 75% memory reduction) or 4 (aggressive, 94% reduction)
-    
-    Returns:
-        mvf: (num_gates, nz, ny, nx, 3) at full resolution
-        
-    Benefits:
-    - Massive memory reduction (75-94%)
-    - 4-16× faster
-    - Excellent accuracy for smooth respiratory motion
-    """
-    # Convert to numpy for downsampling
-    target_np = cp.asnumpy(target_gate) if isinstance(target_gate, cp.ndarray) else target_gate
-    num_gates = floating_gates.shape[0]
-    
-    # Downsample target
-    target_down = zoom(target_np, 1/downsample_factor, order=1)
-    
-    # Downsample all floating gates
-    floating_down = np.zeros((num_gates, *target_down.shape), dtype=np.float32)
-    for g in range(num_gates):
-        floating_np = cp.asnumpy(floating_gates[g]) if isinstance(floating_gates[g], cp.ndarray) else floating_gates[g]
-        floating_down[g] = zoom(floating_np, 1/downsample_factor, order=1)
-    
-    # Adjust physical spacing
-    parms_down = parms.copy()
-    parms_down['spacing'] = tuple(s * downsample_factor for s in parms['spacing'])
-    
-    print(f"Motion estimation on downsampled images ({downsample_factor}× reduction)")
-    print(f"  Original: {target_np.shape} -> Downsampled: {target_down.shape}")
-    
-    # Estimate motion on downsampled (using gate-wise processing)
-    mvf_down = motion_fun_demons_gatewise(
-        target_down,
-        floating_down,
-        parms_down,
-        target_gate_idx
-    )
-    
-    # Upsample motion fields to original resolution
-    print("  Upsampling motion fields to full resolution...")
-    mvf_full = np.zeros((num_gates, *target_np.shape, 3), dtype=np.float32)
-    
-    for gate_idx in range(num_gates):
-        if gate_idx == target_gate_idx:
-            continue
-        
-        for dim in range(3):
-            # Cubic interpolation for smooth motion fields
-            mvf_full[gate_idx, ..., dim] = zoom(
-                mvf_down[gate_idx, ..., dim],
-                downsample_factor,
-                order=3  # Cubic interpolation
-            ) * downsample_factor  # Scale displacement magnitudes
-    
-    del target_down, floating_down, mvf_down
-    gc.collect()
-    
-    return mvf_full
 
 
 def invert_mvf_gatewise(mvf, num_iter=100):
@@ -196,15 +132,16 @@ def invert_mvf_gatewise(mvf, num_iter=100):
     """
     from cupyx.scipy.interpolate import interpn as interpn_cp
     
+    ## Initialize number of gates and shape of mvf_inv
     num_gates = mvf.shape[0]
     mvf_inv_full = np.zeros_like(mvf)
     
-    # Convert to cupy for faster interpolation
+    ## Convert to cupy for faster interpolation
     mvf_cp = cp.asarray(mvf)
     
     nz, ny, nx = mvf.shape[1:4]
     
-    # Create coordinate grids once
+    ## Create coordinate grids once using cupy 
     in_x = cp.arange(0, nz, 1)
     in_y = cp.arange(0, ny, 1)
     in_z = cp.arange(0, nx, 1)
@@ -212,7 +149,7 @@ def invert_mvf_gatewise(mvf, num_iter=100):
     
     mu = 0.9
     
-    # Process each gate independently
+    ## Process each gate independently
     for gate_idx in range(num_gates):
         print(f"  Inverting motion: gate {gate_idx+1}/{num_gates}")
         
@@ -227,9 +164,9 @@ def invert_mvf_gatewise(mvf, num_iter=100):
         mvf_gate[:, :, 0, ...] = mvf_gate[:, :, 1, ...]
         mvf_gate[:, :, -1, ...] = mvf_gate[:, :, -2, ...]
         
-        # Iterative inversion
+        ## Iterative inversion
         for iter in range(num_iter):
-            # Compute residual: r(x) = v_hat(x) + u(x + v_hat(x))
+            ## Compute residual: r(x) = v_hat(x) + u(x + v_hat(x))
             mvf_inv_grid = cp.stack((
                 x + mvf_inv_gate[..., 0],
                 y + mvf_inv_gate[..., 1],
@@ -362,3 +299,70 @@ def multiscale_demons(registration_algorithm, fixed_image, moving_image,
         initial_displacement_field = registration_algorithm.Execute(f_image, m_image, initial_displacement_field)
     
     return sitk.DisplacementFieldTransform(initial_displacement_field)
+
+
+
+## ARCHIVE
+def motion_fun_demons_downsampled(target_gate, floating_gates, parms, target_gate_idx, downsample_factor=2):
+    """
+    Estimate motion on downsampled images, upsample motion fields
+    
+    Args:
+        downsample_factor: 2 (safe, 75% memory reduction) or 4 (aggressive, 94% reduction)
+    
+    Returns:
+        mvf: (num_gates, nz, ny, nx, 3) at full resolution
+        
+    Benefits:
+    - Massive memory reduction (75-94%)
+    - 4-16× faster
+    - Excellent accuracy for smooth respiratory motion
+    """
+    # Convert to numpy for downsampling
+    target_np = cp.asnumpy(target_gate) if isinstance(target_gate, cp.ndarray) else target_gate
+    num_gates = floating_gates.shape[0]
+    
+    # Downsample target
+    target_down = zoom(target_np, 1/downsample_factor, order=1)
+    
+    # Downsample all floating gates
+    floating_down = np.zeros((num_gates, *target_down.shape), dtype=np.float32)
+    for g in range(num_gates):
+        floating_np = cp.asnumpy(floating_gates[g]) if isinstance(floating_gates[g], cp.ndarray) else floating_gates[g]
+        floating_down[g] = zoom(floating_np, 1/downsample_factor, order=1)
+    
+    # Adjust physical spacing
+    parms_down = parms.copy()
+    parms_down['spacing'] = tuple(s * downsample_factor for s in parms['spacing'])
+    
+    print(f"Motion estimation on downsampled images ({downsample_factor}× reduction)")
+    print(f"  Original: {target_np.shape} -> Downsampled: {target_down.shape}")
+    
+    # Estimate motion on downsampled (using gate-wise processing)
+    mvf_down = motion_fun_demons_gatewise(
+        target_down,
+        floating_down,
+        parms_down,
+        target_gate_idx
+    )
+    
+    # Upsample motion fields to original resolution
+    print("  Upsampling motion fields to full resolution...")
+    mvf_full = np.zeros((num_gates, *target_np.shape, 3), dtype=np.float32)
+    
+    for gate_idx in range(num_gates):
+        if gate_idx == target_gate_idx:
+            continue
+        
+        for dim in range(3):
+            # Cubic interpolation for smooth motion fields
+            mvf_full[gate_idx, ..., dim] = zoom(
+                mvf_down[gate_idx, ..., dim],
+                downsample_factor,
+                order=3  # Cubic interpolation
+            ) * downsample_factor  # Scale displacement magnitudes
+    
+    del target_down, floating_down, mvf_down
+    gc.collect()
+    
+    return mvf_full
